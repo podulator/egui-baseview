@@ -336,6 +336,9 @@ pub struct EguiWindow<A: App> {
     pointer_logical_pos: Cell<Option<egui::Pos2>>,
     current_cursor_icon: Cell<baseview::MouseCursor>,
     repaint_notifier: Option<RepaintNotifier>,
+    /// Checks the notifier at a steady rate: with baseview 0.4's lazy redraws nothing else polls it,
+    /// so a notifier set from another thread (an audio thread's meters) would never be seen.
+    _notifier_timer: Option<baseview::TimerHandle>,
     modifiers: Cell<egui::Modifiers>,
 
     // Re-use the allocations from the previous output.
@@ -354,6 +357,10 @@ impl<A: App> EguiWindow<A> {
         repaint_notifier: Option<RepaintNotifier>,
     ) -> Result<EguiWindow<A>, HandlerError> {
         let renderer = Renderer::new(window.clone(), graphics_config)?;
+        // Not every platform can make a timer; without one, notifier repaints wait for an event.
+        let notifier_timer = repaint_notifier
+            .as_ref()
+            .and_then(|_| window.create_timer(NOTIFIER_INTERVAL).ok());
         let egui_ctx = egui::Context::default();
 
         egui_ctx.set_zoom_factor(zoom_factor);
@@ -429,6 +436,7 @@ impl<A: App> EguiWindow<A> {
             zoom_factor: zoom_factor.into(),
             window,
             repaint_notifier,
+            _notifier_timer: notifier_timer,
             modifiers: Cell::new(egui::Modifiers::default()),
             full_output: RefCell::new(FullOutput::default()),
         })
@@ -520,7 +528,15 @@ fn update_modifiers(
     }
 }
 
+/// How often the repaint notifier is checked (about 66 Hz, the frame rate of the old timers).
+const NOTIFIER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(15);
+
 impl<A: App> WindowHandler for EguiWindow<A> {
+    fn on_timer(&self, _timer: &baseview::TimerHandle) {
+        // The only timer is the notifier's: same check as poll().
+        self.poll();
+    }
+
     fn poll(&self) {
         if let Some(repaint_notifier) = &self.repaint_notifier
             && repaint_notifier.repaint_requested()
